@@ -1,6 +1,7 @@
 import os
 import logging
 import requests
+import sqlite3
 import unicodedata
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -9,7 +10,10 @@ from telegram.error import Conflict
 # 🔐 TOKEN
 TOKEN = os.getenv("TOKEN")
 
-# 🧾 Configuração de LOG
+# 📂 Caminho do banco no disco persistente do Render
+DB_PATH = "/var/data/dados.db"
+
+# 🧾 LOG
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
@@ -17,18 +21,81 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# 🔕 Silenciar logs de polling do Telegram/httpx
+# 🔕 Silenciar logs do Telegram/httpx
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 
-# 🔤 Normalizar texto (remover acentos)
+# 🔤 Normalizar texto
 def normalizar_texto(texto):
     texto = texto.lower()
     texto = unicodedata.normalize("NFD", texto)
     texto = texto.encode("ascii", "ignore").decode("utf-8")
     return texto
 
-# 📊 Estimar funcionários por porte
+# 🗄️ Conectar no banco
+def get_db():
+    return sqlite3.connect(DB_PATH)
+
+# 🏗️ Criar tabelas se não existirem
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS empresas (
+        cnpj TEXT PRIMARY KEY,
+        razao_social TEXT,
+        municipio TEXT,
+        uf TEXT
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS usuarios_autorizados (
+        user_id INTEGER PRIMARY KEY
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+# 🔎 Verificar usuário autorizado
+def usuario_autorizado(user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT 1 FROM usuarios_autorizados WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+
+    conn.close()
+    return result is not None
+
+# ➕ Adicionar usuário autorizado (uso manual via script depois)
+def adicionar_usuario(user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("INSERT OR IGNORE INTO usuarios_autorizados (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
+
+# 🔎 Consulta BrasilAPI
+def buscar_cnpj(cnpj):
+    try:
+        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
+        r = requests.get(url, timeout=10)
+
+        if r.status_code != 200:
+            logger.warning(f"Erro ao consultar CNPJ {cnpj} | Status: {r.status_code}")
+            return None
+
+        return r.json()
+
+    except Exception as e:
+        logger.error(f"Erro ao consultar CNPJ {cnpj} | {e}")
+        return None
+
+# 📊 Estimar funcionários
 def estimar_funcionarios(porte):
     if not porte:
         return "Não informado"
@@ -44,25 +111,7 @@ def estimar_funcionarios(porte):
     else:
         return "50+ funcionários"
 
-# 🔎 Consulta por CNPJ
-def buscar_cnpj(cnpj):
-    logger.info(f"Consultando CNPJ: {cnpj}")
-
-    try:
-        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
-        r = requests.get(url, timeout=10)
-
-        if r.status_code != 200:
-            logger.warning(f"Erro ao consultar CNPJ {cnpj} | Status: {r.status_code}")
-            return None
-
-        return r.json()
-
-    except Exception as e:
-        logger.error(f"Exceção ao consultar CNPJ {cnpj} | Erro: {e}")
-        return None
-
-# 🧾 Formatar dados da empresa
+# 🧾 Formatar empresa
 def formatar_empresa(data):
     nome = data.get("razao_social", "N/A")
     fantasia = data.get("nome_fantasia", "N/A")
@@ -90,51 +139,41 @@ def formatar_empresa(data):
         f"📞 {telefone}\n"
     )
 
-# 🔎 Buscar empresas por cidade
-def buscar_por_cidade(cidade):
-    logger.info(f"Consultando cidade: {cidade}")
+# 🏙️ Buscar empresas no banco e remover após uso
+def buscar_empresas_por_cidade(cidade, limite=10):
+    conn = get_db()
+    cursor = conn.cursor()
 
-    try:
-        url = f"https://brasilapi.com.br/api/cnpj/v1?municipio={cidade}"
-        r = requests.get(url, timeout=10)
+    cursor.execute("""
+        SELECT cnpj FROM empresas
+        WHERE municipio = ?
+        LIMIT ?
+    """, (cidade, limite))
 
-        if r.status_code != 200:
-            logger.warning(f"Erro ao buscar empresas na cidade {cidade} | Status: {r.status_code}")
-            return "❌ Erro ao buscar empresas."
+    resultados = cursor.fetchall()
 
-        data = r.json()
+    if not resultados:
+        conn.close()
+        return []
 
-        if not data:
-            logger.info(f"Nenhuma empresa encontrada na cidade: {cidade}")
-            return "⚠️ Nenhuma empresa encontrada."
+    cnpjs = [row[0] for row in resultados]
 
-        resposta = f"🏙️ Empresas em {cidade.title()}:\n\n"
+    # 🔥 Remover os CNPJs usados
+    cursor.executemany("DELETE FROM empresas WHERE cnpj = ?", [(c,) for c in cnpjs])
 
-        contador = 0
+    conn.commit()
+    conn.close()
 
-        for empresa in data:
-            if contador == 10:
-                break
+    return cnpjs
 
-            cnpj = empresa.get("cnpj")
-            detalhes = buscar_cnpj(cnpj)
-
-            if detalhes:
-                resposta += formatar_empresa(detalhes)
-                resposta += "-----------------\n"
-                contador += 1
-
-        logger.info(f"Retornadas {contador} empresas para cidade: {cidade}")
-        return resposta
-
-    except Exception as e:
-        logger.error(f"Exceção ao buscar cidade {cidade} | Erro: {e}")
-        return "❌ Erro interno ao buscar empresas."
-
-# 📌 Comando /start
+# 📌 /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
-    logger.info(f"/start usado por user_id={user}")
+    logger.info(f"/start | user_id={user}")
+
+    if not usuario_autorizado(user):
+        await update.message.reply_text("⛔ Você não está autorizado a usar este bot.")
+        return
 
     await update.message.reply_text(
         "🤖 Bot CNPJ Online!\n\n"
@@ -143,12 +182,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cidade santo andre"
     )
 
-# 📌 Comando /cnpj
+# 📌 /cnpj
 async def cnpj(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
 
+    if not usuario_autorizado(user):
+        await update.message.reply_text("⛔ Você não está autorizado a usar este bot.")
+        return
+
     if not context.args:
-        logger.warning(f"/cnpj sem argumento | user_id={user}")
         await update.message.reply_text("Use: /cnpj 00000000000100")
         return
 
@@ -163,29 +205,46 @@ async def cnpj(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(formatar_empresa(data))
 
-# 📌 Comando /cidade
+# 📌 /cidade
 async def cidade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
 
+    if not usuario_autorizado(user):
+        await update.message.reply_text("⛔ Você não está autorizado a usar este bot.")
+        return
+
     if not context.args:
-        logger.warning(f"/cidade sem argumento | user_id={user}")
         await update.message.reply_text("Use: /cidade santo andre")
         return
 
     cidade_original = " ".join(context.args)
     cidade_api = normalizar_texto(cidade_original)
 
-    logger.info(f"/cidade {cidade_original} (normalizado: {cidade_api}) | user_id={user}")
+    logger.info(f"/cidade {cidade_original} | normalizado={cidade_api} | user_id={user}")
 
-    resultado = buscar_por_cidade(cidade_api)
-    await update.message.reply_text(resultado)
+    cnpjs = buscar_empresas_por_cidade(cidade_api, limite=10)
 
-# 🚀 Inicializar bot com proteção contra crash
+    if not cnpjs:
+        await update.message.reply_text("⚠️ Não há mais empresas disponíveis para essa cidade.")
+        return
+
+    resposta = f"🏙️ Empresas em {cidade_original.title()}:\n\n"
+
+    for cnpj in cnpjs:
+        data = buscar_cnpj(cnpj)
+        if data:
+            resposta += formatar_empresa(data)
+            resposta += "-----------------\n"
+
+    await update.message.reply_text(resposta)
+
+# 🚀 Inicialização
 logger.info("Iniciando bot...")
 
 if not TOKEN:
-    logger.error("TOKEN não encontrado! Verifique a variável de ambiente no Render.")
     raise ValueError("TOKEN não configurado")
+
+init_db()
 
 try:
     app = ApplicationBuilder().token(TOKEN).build()
@@ -194,12 +253,12 @@ try:
     app.add_handler(CommandHandler("cnpj", cnpj))
     app.add_handler(CommandHandler("cidade", cidade))
 
-    logger.info("Bot iniciado com sucesso. Aguardando comandos...")
+    logger.info("Bot iniciado com sucesso.")
 
     app.run_polling()
 
 except Conflict:
-    logger.warning("Conflito detectado: outra instância do bot está rodando.")
+    logger.warning("Outra instância do bot está rodando.")
 
 except Exception as e:
-    logger.exception(f"Erro fatal ao iniciar o bot: {e}")
+    logger.exception(f"Erro fatal: {e}")
