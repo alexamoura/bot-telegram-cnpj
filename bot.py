@@ -1,6 +1,7 @@
 import os
 import logging
 import requests
+import unicodedata
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.error import Conflict
@@ -19,6 +20,13 @@ logger = logging.getLogger(__name__)
 # 🔕 Silenciar logs de polling do Telegram/httpx
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+
+# 🔤 Normalizar texto (remover acentos)
+def normalizar_texto(texto):
+    texto = texto.lower()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = texto.encode("ascii", "ignore").decode("utf-8")
+    return texto
 
 # 📊 Estimar funcionários por porte
 def estimar_funcionarios(porte):
@@ -164,10 +172,12 @@ async def cidade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use: /cidade santo andre")
         return
 
-    cidade_nome = " ".join(context.args)
-    logger.info(f"/cidade {cidade_nome} | user_id={user}")
+    cidade_original = " ".join(context.args)
+    cidade_api = normalizar_texto(cidade_original)
 
-    resultado = buscar_por_cidade(cidade_nome)
+    logger.info(f"/cidade {cidade_original} (normalizado: {cidade_api}) | user_id={user}")
+
+    resultado = buscar_por_cidade(cidade_api)
     await update.message.reply_text(resultado)
 
 # 🚀 Inicializar bot com proteção contra crash
