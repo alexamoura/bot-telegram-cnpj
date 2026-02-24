@@ -11,7 +11,7 @@ from telegram.error import Conflict
 TOKEN = os.getenv("TOKEN")
 
 # 📂 Caminho do banco no disco persistente do Render
-DB_PATH = "/var/data/dados.db"
+DB_PATH = "/data/dados.db"
 
 # 🧾 LOG
 logging.basicConfig(
@@ -262,3 +262,4 @@ except Conflict:
 
 except Exception as e:
     logger.exception(f"Erro fatal: {e}")
+
