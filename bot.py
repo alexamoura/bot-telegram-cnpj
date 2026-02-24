@@ -3,6 +3,7 @@ import logging
 import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.error import Conflict
 
 # 🔐 TOKEN
 TOKEN = os.getenv("TOKEN")
@@ -14,6 +15,10 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# 🔕 Silenciar logs de polling do Telegram/httpx
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 # 📊 Estimar funcionários por porte
 def estimar_funcionarios(porte):
@@ -165,7 +170,7 @@ async def cidade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resultado = buscar_por_cidade(cidade_nome)
     await update.message.reply_text(resultado)
 
-# 🚀 Inicializar bot
+# 🚀 Inicializar bot com proteção contra crash
 logger.info("Iniciando bot...")
 
 if not TOKEN:
@@ -182,6 +187,9 @@ try:
     logger.info("Bot iniciado com sucesso. Aguardando comandos...")
 
     app.run_polling()
+
+except Conflict:
+    logger.warning("Conflito detectado: outra instância do bot está rodando.")
 
 except Exception as e:
     logger.exception(f"Erro fatal ao iniciar o bot: {e}")
